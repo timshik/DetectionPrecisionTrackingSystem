@@ -213,6 +213,12 @@ class ObjectDetectorTracker:
             Class IDs to keep. ``None`` keeps all classes — use this for
             single-class thermal models where class 0 is already 'human'.
             Pass ``[0]`` to restrict a COCO model to the 'person' class only.
+
+        Notes
+        -----
+        BoT-SORT's track_high_thresh and new_track_thresh are set equal to
+        ``confidence`` so they never silently discard detections that already
+        passed the YOLO confidence gate.
         """
         self.confidence = confidence
         self.iou_threshold = iou_threshold
@@ -220,9 +226,14 @@ class ObjectDetectorTracker:
         self.target_classes = target_classes
 
         # Write a custom tracker YAML so all parameters are under our control.
+        # Align BoT-SORT thresholds with the YOLO confidence so detections that
+        # pass YOLO are never silently dropped by the tracker.
         self._tracker_cfg_path = self._write_tracker_config(
             track_buffer=track_buffer,
             gmc_method=gmc_method,
+            track_high_thresh=confidence,
+            track_low_thresh=max(0.01, confidence - 0.05),
+            new_track_thresh=confidence,
         )
         # Override with a user-supplied path if it isn't the sentinel value.
         if tracker_config != "botsort.yaml":
@@ -294,25 +305,34 @@ class ObjectDetectorTracker:
         return detections
 
     @staticmethod
-    def _write_tracker_config(track_buffer: int, gmc_method: str) -> Path:
+    def _write_tracker_config(
+        track_buffer: int,
+        gmc_method: str,
+        track_high_thresh: float,
+        track_low_thresh: float,
+        new_track_thresh: float,
+    ) -> Path:
         """
         Write a botsort_custom.yaml with the caller's parameters.
+
+        track_high_thresh / new_track_thresh must be <= the YOLO conf threshold
+        or BoT-SORT will silently discard every detection before forming tracks.
 
         Returns the path to the written file.
         """
         cfg = textwrap.dedent(f"""\
             tracker_type: botsort
-            track_high_thresh: 0.5      # high-conf threshold, first association pass
-            track_low_thresh: 0.1       # low-conf threshold, second association pass
-            new_track_thresh: 0.6       # min score to initialise a brand-new track
-            track_buffer: {track_buffer}           # frames to keep a lost track alive
-            match_thresh: 0.7           # IOU threshold for track-detection matching
-            proximity_thresh: 0.5       # proximity gate for ReID matching
-            appearance_thresh: 0.25     # appearance embedding similarity threshold
-            with_reid: false            # disable ReID (no separate embedding model)
-            fuse_score: true            # fuse detection score into Kalman update
-            gmc_method: {gmc_method}   # GMC algorithm (sparseOptFlow recommended for drones)
-            model: null                 # ReID model path; null = disabled (with_reid: false)
+            track_high_thresh: {track_high_thresh}   # first-pass association; keep <= YOLO conf
+            track_low_thresh: {track_low_thresh}    # second-pass (recovering lost tracks)
+            new_track_thresh: {new_track_thresh}    # min score to initialise a brand-new track
+            track_buffer: {track_buffer}             # frames to keep a lost track alive
+            match_thresh: 0.7            # IOU threshold for track-detection matching
+            proximity_thresh: 0.5        # proximity gate for ReID matching
+            appearance_thresh: 0.25      # appearance embedding similarity threshold
+            with_reid: false             # disable ReID (no separate embedding model)
+            fuse_score: true             # fuse detection score into Kalman update
+            gmc_method: {gmc_method}    # GMC algorithm (sparseOptFlow recommended for drones)
+            model: null                  # ReID model path; null = disabled (with_reid: false)
         """)
         path = Path("botsort_custom.yaml")
         path.write_text(cfg, encoding="utf-8")
@@ -715,7 +735,7 @@ if __name__ == "__main__":
         video_path=r"videos\How to hide from a thermal drone (Ukraine).mp4",
         model_weights=thermal_weights,
         tracker_config="botsort.yaml",  # auto-generates botsort_custom.yaml
-        confidence=0.01,                # thermal model: start low, tune up if noisy
+        confidence=0.15,                # diagnostic showed real hits at 0.15-0.40
         iou_threshold=0.50,
         track_buffer=30,
         gmc_method="sparseOptFlow",
